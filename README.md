@@ -105,13 +105,34 @@ Open **`http://localhost:5179/softphone/`** (adjust host/port if `PORT` differs)
 
 Prefer configuring **WSS (SIP over WebSocket)** and **SIP host** in the gateway admin UI (the BFF reads them via `GET /api/v1/webrtc/config`). If they are missing, the `WEBRTC_*` environment variables above are used.
 
-## Production (overview)
+## Production — gateway-only (recommended)
+
+No Node.js BFF is required in production.  The **Callspire PBX Gateway** mounts
+the SPA and all `/api/*` browser routes natively via `mount_web_softphone()`.
+
+1. Build the SPA:
+   ```bash
+   bash scripts/build.sh        # Linux / macOS / WSL
+   # or
+   .\scripts\build.ps1          # Windows PowerShell
+   ```
+2. Point the gateway at the built folder:
+   ```
+   SOFTPHONE_STATIC_DIR=/path/to/softphone-web/dist
+   SESSION_SECRET=<strong-random>
+   TRUST_PROXY=true              # required behind nginx
+   ```
+3. Put nginx in front for TLS termination (see **`docs/nginx-example.conf`**).
+
+### Production — Node BFF (legacy path)
+
+If you prefer to keep the Express BFF:
 
 1. Build the SPA: `cd softphone-web && npm ci && npm run build`.
 2. Install BFF deps: `cd softphone-bff && npm ci`.
 3. Run `node src/server.js` (or `npm start`) with **`SESSION_SECRET`**, **`PBX_GATEWAY_BASE_URL`**, and for HTTPS **`TRUST_PROXY=true`** and a correct **`SESSION_SECURE`**.
 
-Behind nginx: proxy to Node and pass `Host`, `X-Forwarded-Proto`, `X-Forwarded-For`. Details and troubleshooting (e.g. `GET /api/me` returning 401 after login) are in **`softphone-bff/README.md`**.
+Behind nginx: proxy to Node and pass `Host`, `X-Forwarded-Proto`, `X-Forwarded-For`. Details in **`softphone-bff/README.md`**.
 
 ## Browser-facing API (same origin)
 

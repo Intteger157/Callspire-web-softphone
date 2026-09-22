@@ -2,14 +2,32 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="color-scheme" content="light dark" />
-    <link rel="icon" href="favicon.ico" sizes="any" />
-    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Callspire Softphone</title>
+    <title>Callspire Web Softphone</title>
+    <script>
+      (function () {
+        var onLogin = /\/login\/?$/.test(location.pathname)
+        var theme
+        if (onLogin) {
+          theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+        } else {
+          try { theme = localStorage.getItem('callspire-theme') } catch (e) { theme = null }
+          if (theme !== 'light' && theme !== 'dark') {
+            theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+          }
+        }
+        document.documentElement.setAttribute('data-theme', theme)
+      })()
+    </script>
+    <link rel="icon" href="/softphone/favicon.ico" type="image/x-icon" />
+    <link rel="shortcut icon" href="/softphone/favicon.ico" type="image/x-icon" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div id="app"></div>
+    <script src="/log-bootstrap.js"></script>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
