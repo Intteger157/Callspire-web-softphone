@@ -52,6 +52,10 @@ No nginx or Node.js is required to serve static files — only for TLS terminati
 
 ## Environment variables (`.env`)
 
+Copy **`.env.example`** → **`.env`** for local dev only. Do not commit `.env`.
+
+Gateway runtime config (`config.yaml`) lives in the **[Callspire PBX Gateway](https://github.com/Intteger157/Callspire-PBX-Gateway)** repo — use `config.example.yaml` there.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `VITE_GATEWAY_URL` | `http://127.0.0.1:8005` | Dev-only: gateway target for the `/api` proxy |

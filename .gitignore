@@ -9,6 +9,9 @@ softphone-web/dist/
 .env.*
 !.env.example
 
+# Gateway runtime config belongs in callspire-pbx-gateway (config.example.yaml), not here
+config.yaml
+
 # OS / IDE
 .DS_Store
 Thumbs.db
