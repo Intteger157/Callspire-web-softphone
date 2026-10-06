@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { RTCSession, PeerConnectionEvent, EndEvent } from 'jssip/lib/RTCSession'
+import { startCallRecording, stopCallRecording } from '@/audio/callRecorder'
 import { softphoneAudio, isMicrophonePermissionGranted } from '@/audio/softphoneAudio'
 import {
   sanitizeRemoteSdp,
@@ -12,8 +13,15 @@ import {
   rewritePrivateHostCandidates,
   dialUserForMikoWebRtc,
 } from '@/audio/sdpSanitize'
-import { buildLocalOfferSdpForSignaling, getCallIceBuffer, prepareInboundAnswerPc, prepareOutboundCallPc } from '@/audio/iceWarmup'
-import { buildPcConfig, getActiveUA, useWebRtcStore } from '@/stores/webrtc'
+import {
+  buildLocalOfferSdpForSignaling,
+  getCallIceBuffer,
+  getSipCandidateLines,
+  prepareInboundAnswerPc,
+  prepareOutboundCallPc,
+} from '@/audio/iceWarmup'
+import { preferSrflxForOriginateAnswer } from '@/browserCaps'
+import { buildPcConfig, getActiveUA, turnSharesHostWithPbx, useWebRtcStore } from '@/stores/webrtc'
 import { usePreferencesStore } from '@/stores/preferences'
 import { appLog } from '@/logging/logCapture'
 import { api } from '@/api/client'
@@ -42,6 +50,8 @@ let callMicStream: MediaStream | null = null
 let answerAbortGen = 0
 const boundRemoteAudioPcs = new WeakSet<RTCPeerConnection>()
 let remoteAudioProbeStarted = false
+/** Prevent duplicate process-call if both `ended` and `failed` fire for one session. */
+let kommoUploadSessionKey = ''
 
 export const useCallsStore = defineStore('calls', () => {
   const callStatus = ref<CallStatus>('idle')
@@ -97,9 +107,10 @@ export const useCallsStore = defineStore('calls', () => {
     callPlacedAt.value = null
     outboundCallerId.value = null
     clearOriginateState()
+    kommoUploadSessionKey = ''
   }
 
-  function queueKommoUpload(s: RTCSession) {
+  async function queueKommoUpload(s: RTCSession) {
     const phone = remoteNumber.value?.trim()
     const placedAt = callPlacedAt.value
     if (!phone || !placedAt) return
@@ -109,16 +120,23 @@ export const useCallsStore = defineStore('calls', () => {
     } catch {
       sessionId = undefined
     }
-    void submitEndedCallToKommo({
+    const uploadKey = sessionId || `${phone}_${placedAt}`
+    if (kommoUploadSessionKey === uploadKey) return
+    kommoUploadSessionKey = uploadKey
+
+    // Snapshot before await — `ended`/`failed` handlers call resetCallState() immediately.
+    const meta = {
       phone,
       sessionId,
       isIncoming: direction.value === 'inbound',
       callPlacedAt: placedAt,
       answeredAt: startedAt.value,
-      // Kommo note must say "Call from <outbound caller ID>", not the PBX ext.
       callFromLabel:
         direction.value === 'inbound' ? undefined : outboundCallerId.value ?? undefined,
-    })
+      leadId: resolvedLeadId.value ?? undefined,
+    }
+    const clientRecording = await stopCallRecording()
+    void submitEndedCallToKommo(meta, clientRecording)
   }
 
   async function unlockAudio(options?: { feedback?: boolean }): Promise<boolean> {
@@ -447,6 +465,11 @@ export const useCallsStore = defineStore('calls', () => {
       return sdp
     }
 
+    const webrtcCfg = useWebRtcStore().config
+    const preferSrflxBeforeAnswer = preferSrflxForOriginateAnswer()
+    const pbxTurnHairpin = turnSharesHostWithPbx(webrtcCfg)
+    const omitRelayInSignaling = pbxTurnHairpin && preferSrflxBeforeAnswer
+
     s.on('sdp', (e: { originator?: string; type?: string; sdp?: string }) => {
       if (!e.sdp) return
       if (e.originator === 'remote') {
@@ -462,7 +485,9 @@ export const useCallsStore = defineStore('calls', () => {
       } else if (e.originator === 'local' && (e.type === 'offer' || e.type === 'answer')) {
         const pc = s.connection
         const buffer = pc ? getCallIceBuffer(pc) : null
-        const merged = buildLocalOfferSdpForSignaling(pc, buffer)
+        const merged = buildLocalOfferSdpForSignaling(pc, buffer, {
+          omitRelay: omitRelayInSignaling,
+        })
         if (merged && countCandidates(merged) >= countCandidates(e.sdp ?? '')) {
           e.sdp = merged
         }
@@ -480,18 +505,48 @@ export const useCallsStore = defineStore('calls', () => {
     let hasSrflx = false
     let candidateCount = 0
     let iceGatherActive = originator !== 'remote'
-    const relayOnly = buildPcConfig(useWebRtcStore().config).iceTransportPolicy === 'relay'
-    const baseGatherTimeoutMs = originator === 'remote' ? 1600 : 3000
+    const relayOnly = buildPcConfig(webrtcCfg).iceTransportPolicy === 'relay'
+    const baseGatherTimeoutMs =
+      originator === 'remote'
+        ? preferSrflxBeforeAnswer
+          ? 4500
+          : 1600
+        : preferSrflxBeforeAnswer
+          ? 4500
+          : 3000
     const ICE_GATHER_TIMEOUT_MS = relayOnly ? Math.max(baseGatherTimeoutMs, 4000) : baseGatherTimeoutMs
-    const ICE_GATHER_MAX_WAIT_MS = relayOnly ? 9000 : ICE_GATHER_TIMEOUT_MS
+    const ICE_GATHER_MAX_WAIT_MS = relayOnly || preferSrflxBeforeAnswer ? 9000 : ICE_GATHER_TIMEOUT_MS
     let gatherTimer: number | null = null
     let gatherStartedAt = 0
 
-    const callReady = (reason: string) => {
+    const flushCallReady = (reason: string, attempt = 0) => {
       if (iceReadyCalled) return
-      iceReadyCalled = true
       const pc = s.connection
       const buffer = pc ? getCallIceBuffer(pc) : null
+      const lines = getSipCandidateLines(pc, buffer)
+      const sipHasSrflx = lines.some((l) => /\btyp srflx\b/i.test(l))
+      const localSdp = pc?.localDescription?.sdp ?? ''
+      const sdpHasSrflx = /\btyp srflx\b/i.test(localSdp)
+
+      const bufferHasSrflx =
+        !!buffer?.hasSrflx || lines.some((l) => /\btyp srflx\b/i.test(l))
+      if (
+        preferSrflxBeforeAnswer &&
+        hasSrflx &&
+        !sipHasSrflx &&
+        !sdpHasSrflx &&
+        !bufferHasSrflx &&
+        attempt < 40
+      ) {
+        window.setTimeout(() => flushCallReady(reason, attempt + 1), 25)
+        return
+      }
+      if (!lastReadyFn && attempt < 80) {
+        window.setTimeout(() => flushCallReady(reason, attempt + 1), 25)
+        return
+      }
+
+      iceReadyCalled = true
       if (buffer?.hasRelay && candidateCount === 0) {
         candidateCount = buffer.lines.length
       }
@@ -499,17 +554,34 @@ export const useCallsStore = defineStore('calls', () => {
         reason,
         candidateCount,
         hasSrflx,
+        sipHasSrflx,
         hasRelay: buffer?.hasRelay ?? false,
+        omitRelayInSignaling,
       })
       lastReadyFn?.()
+    }
+
+    const callReady = (reason: string) => {
+      if (iceReadyCalled) return
+      window.setTimeout(() => flushCallReady(reason, 0), 0)
     }
 
     const relayReadyFromPc = (): boolean => {
       const pc = s.connection
       const buffer = pc ? getCallIceBuffer(pc) : null
-      if (buffer?.hasRelay || (buffer?.lines.length ?? 0) > 0) {
+      if (preferSrflxBeforeAnswer && (hasSrflx || buffer?.hasSrflx)) {
         candidateCount = Math.max(candidateCount, buffer?.lines.length ?? 0)
-        callReady(buffer?.hasRelay ? 'relay in PC buffer' : 'host in PC buffer')
+        callReady('srflx available (macOS)')
+        return true
+      }
+      if (relayOnly && buffer?.hasRelay) {
+        candidateCount = Math.max(candidateCount, buffer?.lines.length ?? 0)
+        callReady('relay in PC buffer')
+        return true
+      }
+      if (!preferSrflxBeforeAnswer && !relayOnly && (buffer?.lines.length ?? 0) > 0) {
+        candidateCount = Math.max(candidateCount, buffer?.lines.length ?? 0)
+        callReady('host in PC buffer')
         return true
       }
       return false
@@ -521,7 +593,16 @@ export const useCallsStore = defineStore('calls', () => {
       const onGatherTimeout = () => {
         if (relayReadyFromPc()) return
         const waitedMs = Date.now() - gatherStartedAt
-        if (relayOnly && candidateCount === 0 && waitedMs < ICE_GATHER_MAX_WAIT_MS) {
+        const pc = s.connection
+        const buffer = pc ? getCallIceBuffer(pc) : null
+        const needMoreIce =
+          relayOnly && candidateCount === 0 && waitedMs < ICE_GATHER_MAX_WAIT_MS
+        const safariWaitingSrflx =
+          preferSrflxBeforeAnswer &&
+          !hasSrflx &&
+          !buffer?.hasSrflx &&
+          waitedMs < ICE_GATHER_MAX_WAIT_MS
+        if (needMoreIce || safariWaitingSrflx) {
           gatherTimer = window.setTimeout(onGatherTimeout, Math.min(1000, ICE_GATHER_MAX_WAIT_MS - waitedMs))
           return
         }
@@ -555,10 +636,15 @@ export const useCallsStore = defineStore('calls', () => {
       candidateCount++
       const c = evt.candidate.candidate ?? ''
       appLog('info', '[call] icecandidate', c.slice(0, 96))
-      if (c.includes('srflx') || /\btyp relay\b/i.test(c)) {
-        if (c.includes('srflx')) hasSrflx = true
+      if (c.includes('srflx')) {
+        hasSrflx = true
         if (gatherTimer) window.clearTimeout(gatherTimer)
-        callReady(c.includes('srflx') ? 'srflx candidate found' : 'relay candidate found')
+        callReady('srflx candidate found')
+        return
+      }
+      if (/\btyp relay\b/i.test(c)) {
+        if (gatherTimer) window.clearTimeout(gatherTimer)
+        if (!preferSrflxBeforeAnswer) callReady('relay candidate found')
       }
     })
 
@@ -584,16 +670,21 @@ export const useCallsStore = defineStore('calls', () => {
         prepareOutboundCallPc(pc, { timeoutMs: 8000, minWaitMs: 3000 })
       } else {
         const buffer = prepareInboundAnswerPc(pc, {
-          timeoutMs: relayOnly ? 9000 : 3000,
-          minWaitMs: 800,
+          timeoutMs: preferSrflxBeforeAnswer ? 6000 : relayOnly ? 9000 : 3000,
+          minWaitMs: preferSrflxBeforeAnswer ? 2000 : 800,
+          onAfterGate: (buf) => {
+            if (!buf.hasSrflx && !hasSrflx) return
+            hasSrflx = true
+            if (gatherTimer) window.clearTimeout(gatherTimer)
+            callReady('answer ICE gate — srflx in buffer')
+          },
         })
         beginAnswerIceGather()
         pc.addEventListener('icecandidate', (ev: RTCPeerConnectionIceEvent) => {
           const raw = ev.candidate?.candidate ?? ''
-          if (!raw || iceReadyCalled || !iceGatherActive) return
-          if (/\btyp relay\b/i.test(raw) || buffer.hasRelay) {
-            if (gatherTimer) window.clearTimeout(gatherTimer)
-            callReady('relay in PC buffer')
+          if (!raw) return
+          if (raw.includes('srflx') || buffer.hasSrflx) {
+            hasSrflx = true
           }
         })
       }
@@ -662,7 +753,7 @@ export const useCallsStore = defineStore('calls', () => {
     s.on('sending', (ev: { request?: { body?: string; method?: string } }) => {
       const pc = s.connection
       const buffer = pc ? getCallIceBuffer(pc) : null
-      const merged = buildLocalOfferSdpForSignaling(pc, buffer)
+      const merged = buildLocalOfferSdpForSignaling(pc, buffer, { omitRelay: omitRelayInSignaling })
       const body = ev.request?.body ?? ''
       if (ev.request && merged && countCandidates(merged) > countCandidates(body)) {
         ev.request.body = merged
@@ -711,6 +802,7 @@ export const useCallsStore = defineStore('calls', () => {
         const recv = pc.getReceivers?.().filter((r) => r.track?.kind === 'audio').length ?? 0
         const send = pc.getSenders?.().filter((r) => r.track?.kind === 'audio').length ?? 0
         appLog('info', '[call] media tracks', { ...iceSnapshot(pc), audioReceivers: recv, audioSenders: send })
+        void startCallRecording(pc)
         scheduleIceDiagnostics(pc, s)
         if (isOriginateOutbound) scheduleOriginateMediaRecovery(s, 'accepted')
       }
@@ -728,6 +820,7 @@ export const useCallsStore = defineStore('calls', () => {
       } else if (pc) {
         softphoneAudio.applyReceiverJitterBufferHints(pc)
       }
+      if (pc) void startCallRecording(pc)
     })
 
     s.on('hold', () => {
@@ -760,7 +853,7 @@ export const useCallsStore = defineStore('calls', () => {
         lastError.value = 'Media setup failed — check microphone, STUN/TURN (UDP), or try again'
       }       else lastError.value = cause
       appLog('error', '[call] failed', cause, e)
-      queueKommoUpload(s)
+      void queueKommoUpload(s)
       softphoneAudio.reset()
       resetCallState()
     })
@@ -771,7 +864,7 @@ export const useCallsStore = defineStore('calls', () => {
       stopEarlyMediaPoll()
       softphoneAudio.stopRemoteAudioProbe()
       appLog('info', '[call] ended')
-      queueKommoUpload(s)
+      void queueKommoUpload(s)
       softphoneAudio.reset()
       resetCallState()
     })

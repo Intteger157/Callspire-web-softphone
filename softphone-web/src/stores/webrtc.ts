@@ -132,7 +132,7 @@ export function turnSharesHostWithPbx(config: WebRtcConfig | null): boolean {
 
 
 
-/** pcConfig aligned with WebRtcClient/phone.js: relay-only when TURN is configured. */
+/** pcConfig aligned with WebRtcClient/phone.js: relay-only when TURN is configured on a separate host. */
 
 export function buildPcConfig(config: WebRtcConfig | null): RTCConfiguration {
 
@@ -142,7 +142,12 @@ export function buildPcConfig(config: WebRtcConfig | null): RTCConfiguration {
 
   const hairpin = turnSharesHostWithPbx(config)
 
-  const iceServers = turn.length && !hairpin ? turn : servers
+  let iceServers = turn.length && !hairpin ? turn : servers
+
+  if (hairpin && turn.length) {
+    const stun = servers.filter((s) => !isTurnServer(s))
+    iceServers = [...(stun.length ? stun : DEFAULT_STUN), ...turn]
+  }
 
 
 

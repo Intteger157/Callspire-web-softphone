@@ -1,50 +1,66 @@
 <script setup lang="ts">
-import { onUnmounted, ref } from 'vue'
+import { onUnmounted, ref, watch } from 'vue'
+import { appLog } from '@/logging/logCapture'
 
 const props = defineProps<{
-  /** Full URL to the audio recording (e.g. /api/recording?linkedid=…). */
+  /** Full URL to the audio recording (e.g. /softphone/api/recording?linkedid=…). */
   url: string
+  /** CDR billsec — used when browser cannot read duration from streamed audio. */
+  durationHint?: number
 }>()
 
-// ---------- state ----------
 type PlayerState = 'idle' | 'loading' | 'ready' | 'playing' | 'paused' | 'error'
 const state = ref<PlayerState>('idle')
 const currentTime = ref(0)
 const duration = ref(0)
 const errorMsg = ref('')
 
-// We intentionally keep the HTMLAudioElement as a plain ref (not reactive
-// proxy) so Vue doesn't instrument its properties.
 let audio: HTMLAudioElement | null = null
+let blobUrl: string | null = null
+let loadGen = 0
 
-// ---------- helpers ----------
 function fmt(seconds: number): string {
-  if (!isFinite(seconds)) return '0:00'
+  if (!isFinite(seconds) || seconds < 0) return '0:00'
   const s = Math.floor(seconds) % 60
   const m = Math.floor(seconds / 60) % 60
   const h = Math.floor(seconds / 3600)
-  if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
-  return `${m}:${String(s).padStart(2,'0')}`
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${m}:${String(s).padStart(2, '0')}`
 }
 
-const progress = ref(0)  // 0..100
+const progress = ref(0)
 
-// ---------- audio wiring ----------
-function createAudio() {
-  const el = new Audio()
-  el.preload = 'metadata'
-  el.src = props.url
+function applyDurationHint() {
+  const hint = props.durationHint ?? 0
+  if (hint <= 0) return
+  if (!duration.value || !isFinite(duration.value) || duration.value === 0) {
+    duration.value = hint
+  }
+}
 
+function wireAudio(el: HTMLAudioElement) {
   el.addEventListener('loadedmetadata', () => {
-    duration.value = el.duration
-    state.value = 'ready'
+    if (el.duration && isFinite(el.duration) && el.duration > 0) {
+      duration.value = el.duration
+    }
+    applyDurationHint()
+    if (state.value === 'loading') state.value = 'ready'
+  })
+  el.addEventListener('durationchange', () => {
+    if (el.duration && isFinite(el.duration) && el.duration > 0) {
+      duration.value = el.duration
+    } else {
+      applyDurationHint()
+    }
   })
   el.addEventListener('canplay', () => {
     if (state.value === 'loading') state.value = 'ready'
+    applyDurationHint()
   })
   el.addEventListener('timeupdate', () => {
     currentTime.value = el.currentTime
-    progress.value = duration.value > 0 ? (el.currentTime / duration.value) * 100 : 0
+    const dur = duration.value > 0 ? duration.value : el.duration
+    progress.value = dur > 0 ? (el.currentTime / dur) * 100 : 0
   })
   el.addEventListener('ended', () => {
     state.value = 'paused'
@@ -53,57 +69,127 @@ function createAudio() {
     el.currentTime = 0
   })
   el.addEventListener('error', () => {
-    errorMsg.value = 'Could not load recording'
+    const code = el.error?.code
+    errorMsg.value = code ? `Playback error (${code})` : 'Could not load recording'
     state.value = 'error'
+    appLog('warn', '[player] audio error', { url: props.url, code })
   })
-  return el
 }
 
-function ensureAudio() {
-  if (!audio) {
-    state.value = 'loading'
-    audio = createAudio()
+function disposeAudio() {
+  if (audio) {
+    audio.pause()
+    audio.removeAttribute('src')
+    audio.load()
+    audio = null
+  }
+  if (blobUrl) {
+    URL.revokeObjectURL(blobUrl)
+    blobUrl = null
+  }
+}
+
+async function loadRecording() {
+  const gen = ++loadGen
+  state.value = 'loading'
+  errorMsg.value = ''
+  disposeAudio()
+  applyDurationHint()
+
+  try {
+    const res = await fetch(props.url, { credentials: 'include' })
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`)
+    }
+    const blob = await res.blob()
+    if (gen !== loadGen) return
+    if (blob.size < 32) {
+      throw new Error('Recording file is empty')
+    }
+    blobUrl = URL.createObjectURL(blob)
+    audio = new Audio()
+    audio.preload = 'auto'
+    wireAudio(audio)
+    audio.src = blobUrl
+    audio.load()
+    state.value = 'ready'
+    appLog('info', '[player] loaded', { bytes: blob.size, type: blob.type || 'unknown' })
+  } catch (e) {
+    if (gen !== loadGen) return
+    const msg = e instanceof Error ? e.message : 'Could not load recording'
+    errorMsg.value = msg
+    state.value = 'error'
+    appLog('warn', '[player] fetch failed', msg, props.url)
   }
 }
 
 function togglePlay() {
-  ensureAudio()
-  if (!audio) return
-
+  if (state.value === 'idle' || state.value === 'error') {
+    void loadRecording().then(() => {
+      if (state.value === 'ready' || state.value === 'paused') void play()
+    })
+    return
+  }
+  if (state.value === 'loading') return
   if (state.value === 'playing') {
-    audio.pause()
+    audio?.pause()
     state.value = 'paused'
   } else {
-    void audio.play().then(() => {
-      state.value = 'playing'
-    }).catch(() => {
-      errorMsg.value = 'Playback blocked – click again'
-      state.value = 'paused'
-    })
+    void play()
+  }
+}
+
+async function play() {
+  if (!audio) {
+    await loadRecording()
+  }
+  if (!audio || state.value === 'error') return
+  try {
+    await audio.play()
+    state.value = 'playing'
+    if ((!duration.value || duration.value === 0) && audio.duration > 0) {
+      duration.value = audio.duration
+    } else {
+      applyDurationHint()
+    }
+  } catch {
+    errorMsg.value = 'Playback blocked — click again'
+    state.value = 'paused'
   }
 }
 
 function seek(e: MouseEvent) {
-  if (!audio || duration.value === 0) return
+  const dur = duration.value
+  if (!audio || dur <= 0) return
   const bar = e.currentTarget as HTMLElement
   const rect = bar.getBoundingClientRect()
   const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
-  audio.currentTime = ratio * duration.value
+  audio.currentTime = ratio * dur
   progress.value = ratio * 100
 }
 
+watch(
+  () => props.url,
+  () => {
+    loadGen++
+    disposeAudio()
+    state.value = 'idle'
+    currentTime.value = 0
+    duration.value = 0
+    progress.value = 0
+    errorMsg.value = ''
+    applyDurationHint()
+  },
+)
+
 onUnmounted(() => {
-  if (audio) {
-    audio.pause()
-    audio.src = ''
-    audio = null
-  }
+  loadGen++
+  disposeAudio()
 })
 </script>
 
 <template>
   <div class="player" :class="{ error: state === 'error' }" role="group" aria-label="Recording player">
-    <!-- Play / Pause button -->
     <button
       type="button"
       class="play-btn"
@@ -127,10 +213,8 @@ onUnmounted(() => {
       </span>
     </button>
 
-    <!-- Time: current -->
     <span class="time current">{{ fmt(currentTime) }}</span>
 
-    <!-- Progress bar -->
     <div
       class="bar-wrap"
       role="slider"
@@ -145,10 +229,8 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Time: total -->
     <span class="time total">{{ fmt(duration) }}</span>
 
-    <!-- Error hint -->
     <span v-if="state === 'error'" class="err-hint" :title="errorMsg">⚠</span>
   </div>
 </template>

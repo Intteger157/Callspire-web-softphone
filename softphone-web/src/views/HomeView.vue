@@ -692,12 +692,32 @@ watch(() => calls.lastError, () => void nextTick(scheduleLayoutSync))
   .workspace {
     grid-template-columns: 1fr;
     grid-template-rows: auto minmax(0, 1fr);
+    gap: 0.65rem;
   }
 
   .phone-col {
     flex-shrink: 0;
-    max-height: none;
-    overflow: visible;
+    max-height: min(46vh, 440px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .history-col {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .status-pill {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .status-pill > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   }
 }
 

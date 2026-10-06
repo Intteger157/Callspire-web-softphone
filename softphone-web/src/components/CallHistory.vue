@@ -43,13 +43,21 @@ const pageStarts = ref<number[]>([0])
 const GAP = 8
 /** Extra list height treated as usable when packing rows (avoids empty strip above pager). */
 const PAGE_FILL_SLACK = 14
+const MOBILE_LAYOUT_MQ = '(max-width: 700px)'
+const preferScrollList = ref(false)
+let mobileMq: MediaQueryList | null = null
 let measuring = false
 let resizeTimer: ReturnType<typeof setTimeout> | null = null
 let listObserver: ResizeObserver | null = null
 
 const isCompact = computed(() => !cdr.records.length && !cdr.loading && !searchQuery.value.trim())
 const needsPagination = computed(() => pageStarts.value.length > 1)
+const showPager = computed(() => needsPagination.value && !preferScrollList.value)
 const totalPages = computed(() => Math.max(1, pageStarts.value.length))
+
+function syncMobileLayoutMode() {
+  preferScrollList.value = window.matchMedia(MOBILE_LAYOUT_MQ).matches
+}
 
 const filteredRecords = computed(() => {
   const q = searchQuery.value.trim()
@@ -60,6 +68,7 @@ const filteredRecords = computed(() => {
 const visibleRecords = computed(() => {
   const records = filteredRecords.value
   if (!records.length) return []
+  if (preferScrollList.value) return records
   if (!needsPagination.value) return records
   const start = pageStarts.value[page.value - 1] ?? 0
   const end = pageStarts.value[page.value] ?? records.length
@@ -243,6 +252,11 @@ watch(
 let stopWatch: WatchStopHandle | null = null
 
 onMounted(() => {
+  syncMobileLayoutMode()
+  mobileMq = window.matchMedia(MOBILE_LAYOUT_MQ)
+  mobileMq.addEventListener('change', syncMobileLayoutMode)
+  window.addEventListener('resize', syncMobileLayoutMode)
+
   stopWatch = cdr.watchCallEnd()
   listObserver = new ResizeObserver(() => scheduleMeasureLayout())
   void kommo.fetchKommoStatus().then(() => {
@@ -271,6 +285,13 @@ onUnmounted(() => {
   stopWatch?.()
   listObserver?.disconnect()
   if (resizeTimer) clearTimeout(resizeTimer)
+  mobileMq?.removeEventListener('change', syncMobileLayoutMode)
+  window.removeEventListener('resize', syncMobileLayoutMode)
+})
+
+watch(preferScrollList, () => {
+  page.value = 1
+  void nextTick(measureLayout)
 })
 
 defineExpose({ measureLayout })
@@ -280,7 +301,7 @@ defineExpose({ measureLayout })
   <section
     ref="rootRef"
     class="history"
-    :class="{ compact: isCompact, filled: !isCompact }"
+    :class="{ compact: isCompact, filled: !isCompact, 'scroll-all': preferScrollList && !isCompact }"
     :style="rootStyle"
   >
     <div ref="hdrRef" class="hdr">
@@ -399,7 +420,7 @@ defineExpose({ measureLayout })
         <CallHistoryList :records="visibleRecords" />
       </div>
 
-      <nav v-if="needsPagination" ref="pagerRef" class="pager" aria-label="Recent calls pages">
+      <nav v-if="showPager" ref="pagerRef" class="pager" aria-label="Recent calls pages">
         <button type="button" class="pager-btn" :disabled="page <= 1" @click="page--">‹ Prev</button>
         <span class="pager-info">{{ page }} / {{ totalPages }}</span>
         <button type="button" class="pager-btn" :disabled="page >= totalPages" @click="page++">
@@ -432,6 +453,11 @@ defineExpose({ measureLayout })
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+.history.scroll-all.filled .list-wrap {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .hdr {

@@ -40,6 +40,18 @@ function parseCandidateFields(line: string): {
   return { proto: m[1].toLowerCase(), ip: m[2], port: Number(m[3]), typ: m[4].toLowerCase() }
 }
 
+function isNonRoutableHostIp(ip: string): boolean {
+  const parts = ip.split('.').map((p) => Number(p))
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return false
+  if (parts[0] === 10) return true
+  if (parts[0] === 172 && parts[1]! >= 16 && parts[1]! <= 31) return true
+  if (parts[0] === 192 && parts[1] === 168) return true
+  if (parts[0] === 127 || parts[0] === 0) return true
+  // Safari / iCloud Private Relay often reports 198.18.x as "host" — unusable for PSTN ICE.
+  if (parts[0] === 198 && parts[1]! >= 18 && parts[1]! <= 19) return true
+  return false
+}
+
 /** RTP needs UDP with a real port — skip Chrome TCP / 0.0.0.0:9 placeholders. */
 export function isUsableCandidateLine(line: string): boolean {
   const f = parseCandidateFields(line)
@@ -47,6 +59,7 @@ export function isUsableCandidateLine(line: string): boolean {
   if (f.proto !== 'udp') return false
   if (!f.port || f.port === 9) return false
   if (f.ip === '0.0.0.0' || f.ip === '::') return false
+  if (f.typ === 'host' && isNonRoutableHostIp(f.ip)) return false
   return true
 }
 
@@ -221,10 +234,15 @@ async function collectUsableCandidateLines(
 export function buildLocalOfferSdpForSignaling(
   pc: RTCPeerConnection | null | undefined,
   buffer: IceCandidateBuffer | null | undefined,
+  options?: { omitRelay?: boolean },
 ): string {
   const base = pc?.localDescription?.sdp ?? ''
   if (!base) return ''
-  const lines = getSipCandidateLines(pc, buffer)
+  let lines = getSipCandidateLines(pc, buffer)
+  if (options?.omitRelay) {
+    const withoutRelay = lines.filter((l) => !/\btyp relay\b/i.test(l))
+    if (withoutRelay.some((l) => /\btyp srflx\b/i.test(l))) lines = withoutRelay
+  }
   if (lines.length) {
     const merged = mergeCandidatesIntoSdp(base, lines)
     if (countCandidates(merged) >= countCandidates(base)) return merged
@@ -279,7 +297,12 @@ export function installLocalSdpIceGate(
   pc: RTCPeerConnection,
   buffer: IceCandidateBuffer,
   gateSdpType: 'offer' | 'answer',
-  options: { timeoutMs?: number; minWaitMs?: number; logLabel?: string } = {},
+  options: {
+    timeoutMs?: number
+    minWaitMs?: number
+    logLabel?: string
+    onAfterGate?: (buffer: IceCandidateBuffer) => void
+  } = {},
 ): void {
   const gateKey = gateSdpType === 'offer' ? OFFER_GATE_KEY : '_callspireAnswerGate'
   const tagged = pc as RTCPeerConnection & { [key: string]: boolean | undefined }
@@ -327,6 +350,7 @@ export function installLocalSdpIceGate(
             : 'allow UDP outbound + STUN 19302, or configure TURN on gateway',
         })
       }
+      options.onAfterGate?.(buffer)
     }
     return result
   }
@@ -358,13 +382,18 @@ export function prepareOutboundCallPc(
 
 export function prepareInboundAnswerPc(
   pc: RTCPeerConnection,
-  options: { timeoutMs?: number; minWaitMs?: number } = {},
+  options: {
+    timeoutMs?: number
+    minWaitMs?: number
+    onAfterGate?: (buffer: IceCandidateBuffer) => void
+  } = {},
 ): IceCandidateBuffer {
   const buffer = attachCallIceBuffer(pc, 'inbound-pc')
   installLocalSdpIceGate(pc, buffer, 'answer', {
     timeoutMs: options.timeoutMs ?? 3000,
     minWaitMs: options.minWaitMs ?? 800,
     logLabel: 'answer ICE gate',
+    onAfterGate: options.onAfterGate,
   })
   return buffer
 }

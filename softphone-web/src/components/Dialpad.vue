@@ -253,4 +253,31 @@ onUnmounted(() => window.removeEventListener('keydown', onKeyDown))
   box-shadow: none;
   cursor: not-allowed;
 }
+
+@media (max-width: 700px) {
+  .dialpad {
+    gap: 0.5rem;
+  }
+
+  .number-input {
+    font-size: 1.1rem;
+    padding: 0.55rem 2.25rem 0.55rem 0.85rem;
+  }
+
+  .grid {
+    --key-size: clamp(40px, 11vw, 50px);
+    --key-gap-y: 6px;
+    --key-gap-x: 10px;
+    padding: 0.15rem 0;
+  }
+
+  .call-row {
+    padding-top: 0.2rem;
+  }
+
+  .call-btn {
+    width: 46px;
+    height: 46px;
+  }
+}
 </style>

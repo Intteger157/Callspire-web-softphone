@@ -94,10 +94,12 @@ async function logout() {
           aria-hidden="true"
         />
         <span class="brand-text">Callspire Web Softphone</span>
+        <span class="brand-text-short">Callspire</span>
       </div>
 
       <!-- User area -->
       <div class="user" v-if="auth.isAuthenticated">
+        <div class="user-tools" aria-label="Toolbar">
         <button class="top-btn logs-btn" @click="showLogs = true" title="Session logs">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
             fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -178,22 +180,23 @@ async function logout() {
             </li>
           </ul>
         </div>
+        </div>
 
-        <div class="user-meta">
+        <div class="user-meta" :title="auth.email || undefined">
           <span class="user-email">{{ auth.email }}</span>
           <span class="user-ext" v-if="auth.extension">ext {{ auth.extension }}</span>
         </div>
 
-        <div class="avatar">{{ initials }}</div>
+        <div class="avatar" :title="auth.email || ''">{{ initials }}</div>
 
-        <button type="button" class="logout-btn" @click="logout">
+        <button type="button" class="logout-btn" title="Log out" aria-label="Log out" @click="logout">
           <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24"
             fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
             <polyline points="16 17 21 12 16 7"/>
             <line x1="21" y1="12" x2="9" y2="12"/>
           </svg>
-          Log out
+          <span class="logout-label">Log out</span>
         </button>
       </div>
 
@@ -255,12 +258,27 @@ async function logout() {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.brand-text-short {
+  display: none;
+  font-weight: 700;
+  font-size: 13px;
+}
 
 .user {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.55rem;
   margin-left: auto;
+  min-width: 0;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.user-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  flex-shrink: 0;
 }
 
 .user-meta {
@@ -268,11 +286,17 @@ async function logout() {
   flex-direction: column;
   align-items: flex-end;
   gap: 1px;
+  min-width: 0;
+  max-width: 14rem;
 }
 .user-email {
   font-size: 12px;
   color: var(--fg-muted);
   line-height: 1;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .user-ext {
   font-size: 10.5px;
@@ -360,6 +384,7 @@ async function logout() {
 .logout-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 0.45rem;
   padding: 0.35rem 0.65rem;
   border: none;
@@ -371,6 +396,8 @@ async function logout() {
   color: var(--fg-muted);
   cursor: pointer;
   transition: color 0.15s, background 0.15s;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .logout-btn svg {
   flex-shrink: 0;
@@ -419,9 +446,79 @@ async function logout() {
   .content {
     padding: 0.75rem 1rem 1rem;
   }
+
+  .topbar {
+    height: auto;
+    min-height: 48px;
+    padding: 0.45rem 0.65rem;
+    gap: 0.65rem;
+    justify-content: space-between;
+  }
+
+  .brand {
+    flex-shrink: 0;
+    gap: 0.45rem;
+    margin-right: 0.15rem;
+  }
+
+  .brand-text {
+    display: none;
+  }
+
+  .brand-text-short {
+    display: inline;
+  }
+
+  .user {
+    gap: 0.35rem;
+  }
+
+  .user-tools {
+    gap: 0.1rem;
+    padding-right: 0.15rem;
+    border-right: 1px solid var(--border);
+    margin-right: 0.1rem;
+  }
+
+  .user-meta {
+    flex: 1;
+    min-width: 0;
+    max-width: none;
+    align-items: flex-start;
+  }
+
+  .user-ext {
+    display: none;
+  }
+
+  .avatar {
+    display: none;
+  }
+
+  .logout-label {
+    display: none;
+  }
+
+  .logout-btn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+  }
 }
 
-@media (max-height: 720px) {
+@media (max-width: 700px) and (max-height: 520px) {
+  .user-meta {
+    display: none;
+  }
+}
+
+@media (max-width: 380px) {
+  .brand-text-short {
+    display: none;
+  }
+}
+
+@media (min-width: 701px) and (max-height: 720px) {
   .topbar {
     height: 44px;
     padding: 0 1rem;

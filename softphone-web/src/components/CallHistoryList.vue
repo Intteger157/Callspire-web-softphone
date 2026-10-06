@@ -272,7 +272,11 @@ onUnmounted(() => {
           class="player-drop"
           :data-player-row="recordKey(r, idx)"
         >
-          <AudioPlayer :url="cdr.recordingUrl(r.linkedid)" class="player" />
+          <AudioPlayer
+            :url="cdr.recordingUrl(r.linkedid)"
+            :duration-hint="r.billsec"
+            class="player"
+          />
         </div>
       </div>
 

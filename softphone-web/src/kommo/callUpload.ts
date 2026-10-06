@@ -1,4 +1,4 @@
-import { api } from '@/api/client'
+import { api, apiPath } from '@/api/client'
 import type { KommoProcessCallJob, KommoProcessCallRequest } from '@/api/types'
 import { appLog } from '@/logging/logCapture'
 import { useKommoAttachmentsStore } from '@/stores/kommoAttachments'
@@ -14,6 +14,8 @@ export type EndedCallMeta = {
   answeredAt?: number | null
   /** Outbound caller ID used for the call — shown as "Call from …" in Kommo. */
   callFromLabel?: string
+  /** Resolved during the call from GET /kommo/contact (optional). */
+  leadId?: number | null
 }
 
 function toIso(ms: number): string {
@@ -24,7 +26,22 @@ function toIso(ms: number): string {
  * After hangup: submit process-call to PBX Gateway when admin mapped this extension
  * to a Kommo user and gateway Kommo is enabled. Recording is resolved on the server (Miko CDR).
  */
-export async function submitEndedCallToKommo(meta: EndedCallMeta): Promise<void> {
+async function uploadClientRecording(jobId: string, blob: Blob): Promise<void> {
+  const form = new FormData()
+  form.append('file', blob, 'recording.webm')
+  const url = apiPath(`kommo/process-call/${jobId}/recording`)
+  const res = await fetch(url, { method: 'PUT', body: form, credentials: 'include' })
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText)
+    throw new Error(text || `Upload failed (${res.status})`)
+  }
+  appLog('info', '[kommo] client recording uploaded', { jobId, bytes: blob.size })
+}
+
+export async function submitEndedCallToKommo(
+  meta: EndedCallMeta,
+  clientRecording?: Blob | null,
+): Promise<void> {
   const kommo = useKommoStore()
   if (!kommo.canUploadRecording) {
     appLog('info', '[kommo] skip upload — extension not configured for gateway Kommo')
@@ -38,11 +55,18 @@ export async function submitEndedCallToKommo(meta: EndedCallMeta): Promise<void>
   }
 
   const endedAt = Date.now()
-  const answeredAt = meta.answeredAt ?? null
-  const wasAnswered = answeredAt != null && answeredAt > 0
-  const durationSeconds = wasAnswered
-    ? Math.max(0, Math.floor((endedAt - answeredAt) / 1000))
+  let answeredAt = meta.answeredAt ?? null
+  let wasAnswered = answeredAt != null && answeredAt > 0
+  let durationSeconds = wasAnswered
+    ? Math.max(0, Math.floor((endedAt - answeredAt!) / 1000))
     : Math.max(0, Math.floor((endedAt - meta.callPlacedAt) / 1000))
+
+  const hasClientRecording = !!(clientRecording && clientRecording.size > 32)
+  if (!wasAnswered && hasClientRecording && durationSeconds >= 3) {
+    wasAnswered = true
+    answeredAt = endedAt - durationSeconds * 1000
+    appLog('info', '[kommo] infer was_answered from client recording', { durationSeconds })
+  }
 
   const body: KommoProcessCallRequest = {
     phone,
@@ -52,7 +76,8 @@ export async function submitEndedCallToKommo(meta: EndedCallMeta): Promise<void>
     is_incoming: meta.isIncoming,
     duration_seconds: durationSeconds,
     was_answered: wasAnswered,
-    client_recording_enabled: false,
+    lead_id: meta.leadId && meta.leadId > 0 ? meta.leadId : undefined,
+    client_recording_enabled: hasClientRecording,
     connection_slot: 'main',
     call_from_label: meta.callFromLabel?.trim() || undefined,
     enable_recording_upload: true,
@@ -67,6 +92,13 @@ export async function submitEndedCallToKommo(meta: EndedCallMeta): Promise<void>
     })
     const job = await api.post<KommoProcessCallJob>('kommo/process-call', body)
     appLog('info', '[kommo] process-call queued', { jobId: job.id, status: job.status })
+    if (clientRecording && clientRecording.size > 32 && body.client_recording_enabled) {
+      try {
+        await uploadClientRecording(job.id, clientRecording)
+      } catch (e) {
+        appLog('error', '[kommo] client recording upload failed', e)
+      }
+    }
     void pollKommoJobStatus(job.id, meta)
   } catch (e) {
     appLog('error', '[kommo] process-call failed', e)
